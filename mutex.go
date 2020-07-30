@@ -5,7 +5,7 @@ import (
 	"encoding/base64"
 	"time"
 
-	"github.com/gomodule/redigo/redis"
+	"github.com/go-redis/redis/v7"
 	"github.com/hashicorp/go-multierror"
 )
 
@@ -53,10 +53,10 @@ func (m *Mutex) Lock() error {
 		}
 
 		now := time.Now()
-		until := now.Add(m.expiry - now.Sub(start) - time.Duration(int64(float64(m.expiry)*m.factor)))
-		if n >= m.quorum && now.Before(until) {
+		newValidityTime := m.expiry - now.Sub(start) - time.Duration(int64(float64(m.expiry)*m.factor))
+		if n >= m.quorum && newValidityTime > 0 {
 			m.value = value
-			m.until = until
+			m.until = now.Add(newValidityTime)
 			return nil
 		}
 		m.actOnPoolsAsync(func(pool Pool) (bool, error) {
@@ -99,7 +99,7 @@ func (m *Mutex) Valid() (bool, error) {
 func (m *Mutex) valid(pool Pool) (bool, error) {
 	conn := pool.Get()
 	defer conn.Close()
-	reply, err := redis.String(conn.Do("GET", m.name))
+	reply, err := conn.Get(m.name).Result()
 	if err != nil {
 		return false, err
 	}
@@ -118,17 +118,17 @@ func genValue() (string, error) {
 func (m *Mutex) acquire(pool Pool, value string) (bool, error) {
 	conn := pool.Get()
 	defer conn.Close()
-	reply, err := redis.String(conn.Do("SET", m.name, value, "NX", "PX", int(m.expiry/time.Millisecond)))
+	reply, err := conn.SetNX(m.name, value, m.expiry).Result()
 	if err != nil {
-		if err == redis.ErrNil {
+		if err == redis.Nil {
 			return false, nil
 		}
 		return false, err
 	}
-	return reply == "OK", nil
+	return reply, nil
 }
 
-var deleteScript = redis.NewScript(1, `
+var deleteScript = redis.NewScript(`
 	if redis.call("GET", KEYS[1]) == ARGV[1] then
 		return redis.call("DEL", KEYS[1])
 	else
@@ -139,12 +139,12 @@ var deleteScript = redis.NewScript(1, `
 func (m *Mutex) release(pool Pool, value string) (bool, error) {
 	conn := pool.Get()
 	defer conn.Close()
-	status, err := redis.Int64(deleteScript.Do(conn, m.name, value))
+	status, err := deleteScript.Run(conn, []string{m.name}, value).Result()
 
 	return err == nil && status != 0, err
 }
 
-var touchScript = redis.NewScript(1, `
+var touchScript = redis.NewScript(`
 	if redis.call("GET", KEYS[1]) == ARGV[1] then
 		return redis.call("pexpire", KEYS[1], ARGV[2])
 	else
@@ -155,7 +155,7 @@ var touchScript = redis.NewScript(1, `
 func (m *Mutex) touch(pool Pool, value string, expiry int) (bool, error) {
 	conn := pool.Get()
 	defer conn.Close()
-	status, err := redis.Int64(touchScript.Do(conn, m.name, value, expiry))
+	status, err := touchScript.Run(conn, []string{m.name}, value, expiry).Result()
 
 	return err == nil && status != 0, err
 }
