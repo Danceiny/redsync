@@ -28,7 +28,7 @@ type Mutex struct {
 	value        string
 	until        time.Time
 
-	pools []Pool
+	pools []redis.Cmdable
 }
 
 // Lock locks m. In case it returns an error on failure, you may retry to acquire the lock by calling this method again.
@@ -45,7 +45,7 @@ func (m *Mutex) Lock() error {
 
 		start := time.Now()
 
-		n, err := m.actOnPoolsAsync(func(pool Pool) (bool, error) {
+		n, err := m.actOnPoolsAsync(func(pool redis.Cmdable) (bool, error) {
 			return m.acquire(pool, value)
 		})
 		if n == 0 && err != nil {
@@ -59,7 +59,7 @@ func (m *Mutex) Lock() error {
 			m.until = now.Add(newValidityTime)
 			return nil
 		}
-		m.actOnPoolsAsync(func(pool Pool) (bool, error) {
+		m.actOnPoolsAsync(func(pool redis.Cmdable) (bool, error) {
 			return m.release(pool, value)
 		})
 	}
@@ -69,7 +69,7 @@ func (m *Mutex) Lock() error {
 
 // Unlock unlocks m and returns the status of unlock.
 func (m *Mutex) Unlock() (bool, error) {
-	n, err := m.actOnPoolsAsync(func(pool Pool) (bool, error) {
+	n, err := m.actOnPoolsAsync(func(pool redis.Cmdable) (bool, error) {
 		return m.release(pool, m.value)
 	})
 	if n < m.quorum {
@@ -80,7 +80,7 @@ func (m *Mutex) Unlock() (bool, error) {
 
 // Extend resets the mutex's expiry and returns the status of expiry extension.
 func (m *Mutex) Extend() (bool, error) {
-	n, err := m.actOnPoolsAsync(func(pool Pool) (bool, error) {
+	n, err := m.actOnPoolsAsync(func(pool redis.Cmdable) (bool, error) {
 		return m.touch(pool, m.value, int(m.expiry/time.Millisecond))
 	})
 	if n < m.quorum {
@@ -90,16 +90,14 @@ func (m *Mutex) Extend() (bool, error) {
 }
 
 func (m *Mutex) Valid() (bool, error) {
-	n, err := m.actOnPoolsAsync(func(pool Pool) (bool, error) {
+	n, err := m.actOnPoolsAsync(func(pool redis.Cmdable) (bool, error) {
 		return m.valid(pool)
 	})
 	return n >= m.quorum, err
 }
 
-func (m *Mutex) valid(pool Pool) (bool, error) {
-	conn := pool.Get()
-	defer conn.Close()
-	reply, err := conn.Get(m.name).Result()
+func (m *Mutex) valid(pool redis.Cmdable) (bool, error) {
+	reply, err := pool.Get(m.name).Result()
 	if err != nil {
 		return false, err
 	}
@@ -115,10 +113,8 @@ func genValue() (string, error) {
 	return base64.StdEncoding.EncodeToString(b), nil
 }
 
-func (m *Mutex) acquire(pool Pool, value string) (bool, error) {
-	conn := pool.Get()
-	defer conn.Close()
-	reply, err := conn.SetNX(m.name, value, m.expiry).Result()
+func (m *Mutex) acquire(pool redis.Cmdable, value string) (bool, error) {
+	reply, err := pool.SetNX(m.name, value, m.expiry).Result()
 	if err != nil {
 		if err == redis.Nil {
 			return false, nil
@@ -136,10 +132,8 @@ var deleteScript = redis.NewScript(`
 	end
 `)
 
-func (m *Mutex) release(pool Pool, value string) (bool, error) {
-	conn := pool.Get()
-	defer conn.Close()
-	status, err := deleteScript.Run(conn, []string{m.name}, value).Result()
+func (m *Mutex) release(pool redis.Cmdable, value string) (bool, error) {
+	status, err := deleteScript.Run(pool, []string{m.name}, value).Result()
 
 	return err == nil && status != 0, err
 }
@@ -152,15 +146,13 @@ var touchScript = redis.NewScript(`
 	end
 `)
 
-func (m *Mutex) touch(pool Pool, value string, expiry int) (bool, error) {
-	conn := pool.Get()
-	defer conn.Close()
-	status, err := touchScript.Run(conn, []string{m.name}, value, expiry).Result()
+func (m *Mutex) touch(pool redis.Cmdable, value string, expiry int) (bool, error) {
+	status, err := touchScript.Run(pool, []string{m.name}, value, expiry).Result()
 
 	return err == nil && status != 0, err
 }
 
-func (m *Mutex) actOnPoolsAsync(actFn func(Pool) (bool, error)) (int, error) {
+func (m *Mutex) actOnPoolsAsync(actFn func(redis.Cmdable) (bool, error)) (int, error) {
 	type result struct {
 		Status bool
 		Err    error
@@ -168,7 +160,7 @@ func (m *Mutex) actOnPoolsAsync(actFn func(Pool) (bool, error)) (int, error) {
 
 	ch := make(chan result)
 	for _, pool := range m.pools {
-		go func(pool Pool) {
+		go func(pool redis.Cmdable) {
 			r := result{}
 			r.Status, r.Err = actFn(pool)
 			ch <- r
