@@ -4,7 +4,7 @@
 
 Redsync provides a Redis-based distributed mutual exclusion lock implementation for Go as described in [this post](http://redis.io/topics/distlock). A reference library (by [antirez](https://github.com/antirez)) for Ruby is available at [github.com/antirez/redlock-rb](https://github.com/antirez/redlock-rb).
 
-Notice: **This fork use better golang redis library goredis to replace redigo**
+Notice: **This fork use better golang redis library goredis to replace redigo**.
 
 ## Installation
 
@@ -12,7 +12,7 @@ Install Redsync using the go get command:
 
     $ go get github.com/go-redsync/redsync
 
-The only dependencies are the Go distribution and [Redigo](https://github.com/gomodule/redigo).
+The only dependencies are the Go distribution and [goredis/v7](https://github.com/go-redis/redis).
 
 ## Documentation
 
